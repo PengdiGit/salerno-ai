@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>Salerno AI - Admin</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="admin-wrap">
+    <header>
+      <div class="brand">
+        <span class="logo">S</span>
+        <div>
+          <h1>Salerno AI admin</h1>
+          <p>Edit what the bot knows</p>
+        </div>
+      </div>
+      <div class="row">
+        <a href="index.html" class="tag">Back to chat</a>
+        <button id="logout-btn" class="ghost" hidden>Log out</button>
+      </div>
+    </header>
+
+    <section id="login-view" class="card" hidden>
+      <h2>Log in</h2>
+      <form id="login-form">
+        <label>Email <input id="email" type="email" required autocomplete="username"></label>
+        <label>Password <input id="password" type="password" required autocomplete="current-password"></label>
+        <button class="btn" type="submit">Log in</button>
+      </form>
+      <p id="login-status" class="status"></p>
+    </section>
+
+    <section id="editor-view" hidden>
+      <div class="card">
+        <h2 id="form-title">Add an entry</h2>
+        <form id="entry-form">
+          <input type="hidden" id="entry-id">
+          <div class="row">
+            <label class="grow">Title (what a player might ask about)
+              <input id="entry-title" required maxlength="200" placeholder="Current head of Salerno">
+            </label>
+            <label>Category
+              <input id="entry-category" list="category-list" required placeholder="government">
+              <datalist id="category-list"></datalist>
+            </label>
+          </div>
+          <label>Content (write <code>I - https://link</code> on its own line to make the bot read a web page)
+            <textarea id="entry-content" maxlength="20000"></textarea>
+          </label>
+          <div class="row">
+            <button class="btn" type="submit">Save</button>
+            <button class="ghost" type="button" id="cancel-edit" hidden>Cancel edit</button>
+            <span id="save-status" class="status"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="row" style="margin-bottom: 14px;">
+        <input id="search" class="grow" placeholder="Search entries...">
+        <span id="count" class="tag"></span>
+      </div>
+      <div id="entries"></div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>

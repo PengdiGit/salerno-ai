@@ -1,0 +1,43 @@
+# Salerno AI
+
+A chatbot for players of Salerno on CivMC. Ask it about Civ mechanics and Salerno (government, places, shops, history).
+
+- `docs/` is the website (GitHub Pages): `index.html` is the chat, `admin.html` edits the knowledge.
+- `supabase/functions/chat/` is the backend. It loads the knowledge, calls Gemini, and streams the answer back.
+- `supabase/migrations/` is the database setup.
+- `knowledge/` holds the knowledge files (`.md` or `.txt`). See `knowledge/_TEMPLATE.md`.
+- `scripts/seed.mjs` uploads the knowledge files to the database.
+
+## Writing knowledge
+
+Each `# Heading` line starts a new entry. A line like `I - https://some-page` makes the bot read that page when a question is related to it. The file name becomes the category.
+
+```
+node scripts/seed.mjs --dry-run   # preview
+node scripts/seed.mjs             # upload all files
+node scripts/seed.mjs government  # upload only files with "government" in the name
+```
+
+Re-uploading a file replaces the entries that came from it. Entries made on the admin page are not touched.
+
+## One-time setup
+
+1. Create a new project at https://supabase.com/dashboard.
+2. Link and push the database:
+   ```
+   supabase login
+   supabase link --project-ref YOUR-PROJECT-REF
+   supabase db push
+   ```
+3. Give the backend your Gemini key (from https://aistudio.google.com/apikey) and deploy it:
+   ```
+   supabase secrets set GEMINI_API_KEY=your-key
+   supabase functions deploy chat
+   ```
+   Optional secrets: `GEMINI_MODEL` (default `gemini-flash-latest`), `ALLOWED_ORIGINS` (e.g. `https://pengdigit.github.io`), `RATE_LIMIT_MAX` (default 20), `RATE_LIMIT_WINDOW_SECONDS` (default 600), `USE_WEB_SEARCH` (default `true`).
+4. Put the project URL and anon/publishable key in `docs/config.js`.
+5. Copy `.env.example` to `.env`, fill it in, and run `node scripts/seed.mjs`.
+6. For the admin page: create your user in Supabase under Authentication > Users, then run this in the SQL editor:
+   ```sql
+   insert into admins (user_id, name) values ('YOUR-USER-UUID', 'Pengdi');
+   ```
