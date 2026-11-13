@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex">
   <title>Salerno AI - Admin</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="../style.css">
 </head>
 <body>
   <div class="admin-wrap">
@@ -18,7 +18,7 @@
         </div>
       </div>
       <div class="row">
-        <a href="index.html" class="tag">Back to chat</a>
+        <a href="../" class="tag">Back to chat</a>
         <button id="logout-btn" class="ghost" hidden>Log out</button>
       </div>
     </header>
@@ -26,7 +26,6 @@
     <section id="login-view" class="card" hidden>
       <h2>Log in</h2>
       <form id="login-form">
-        <label>Email <input id="email" type="email" required autocomplete="username"></label>
         <label>Password <input id="password" type="password" required autocomplete="current-password"></label>
         <button class="btn" type="submit">Log in</button>
       </form>
@@ -67,7 +66,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js"></script>
+  <script src="../config.js"></script>
   <script src="admin.js"></script>
 </body>
 </html>

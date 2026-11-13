@@ -5,6 +5,7 @@
 // Usage: node scripts/seed.mjs            (all files)
 //        node scripts/seed.mjs mechanics  (only files whose name contains "mechanics")
 //        node scripts/seed.mjs --dry-run  (show what would be uploaded)
+//        node scripts/seed.mjs --sql      (print SQL to paste into the Supabase SQL editor instead of uploading)
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, extname, basename, dirname } from "node:path";
@@ -15,6 +16,7 @@ const knowledgeDir = join(root, "knowledge");
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
+const sqlMode = args.includes("--sql");
 const filter = args.find((a) => !a.startsWith("--"))?.toLowerCase();
 
 try {
@@ -25,7 +27,7 @@ try {
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!dryRun && (!SUPABASE_URL || !SERVICE_KEY)) {
+if (!dryRun && !sqlMode && (!SUPABASE_URL || !SERVICE_KEY)) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Copy .env.example to .env and fill it in.");
   process.exit(1);
 }
@@ -83,10 +85,27 @@ if (!files.length) {
   process.exit(0);
 }
 
+const sqlText = (s) => `'${s.replace(/'/g, "''")}'`;
+
 let total = 0;
+const sql = ["begin;"];
 for (const file of files) {
-  const entries = parseFile(file, await readFile(join(knowledgeDir, file), "utf8"));
+  const text = await readFile(join(knowledgeDir, file), "utf8");
+  if (!text.trim()) {
+    if (!sqlMode) console.log(`${file}: empty, skipped`);
+    continue;
+  }
+  const entries = parseFile(file, text);
   total += entries.length;
+  if (sqlMode) {
+    sql.push(`delete from knowledge where source_file = ${sqlText(file)};`);
+    for (const e of entries) {
+      sql.push(
+        `insert into knowledge (category, title, content, source_file) values (${sqlText(e.category)}, ${sqlText(e.title)}, ${sqlText(e.content)}, ${sqlText(file)});`,
+      );
+    }
+    continue;
+  }
   console.log(`${file}: ${entries.length} entries (category "${entries[0]?.category ?? categoryFromFile(file)}")`);
   if (dryRun) {
     for (const e of entries) console.log(`   - ${e.title}`);
@@ -96,4 +115,9 @@ for (const file of files) {
   if (entries.length) await rest("POST", "knowledge", entries);
 }
 
-console.log(dryRun ? `Dry run: ${total} entries would be uploaded.` : `Done: uploaded ${total} entries.`);
+if (sqlMode) {
+  sql.push("commit;");
+  console.log(sql.join("\n"));
+} else {
+  console.log(dryRun ? `Dry run: ${total} entries would be uploaded.` : `Done: uploaded ${total} entries.`);
+}

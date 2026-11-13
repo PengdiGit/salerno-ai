@@ -1,3 +1,6 @@
+// Single admin account; only the password is typed in.
+const ADMIN_EMAIL = "admin@salerno-ai.app";
+
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const $ = (id) => document.getElementById(id);
@@ -21,7 +24,7 @@ async function showView() {
   if (!admin) {
     loginView.hidden = false;
     editorView.hidden = true;
-    $("login-status").textContent = `Logged in as ${session.user.email}, but this account is not an admin.`;
+    $("login-status").textContent = "This account is not an admin.";
     return;
   }
 
@@ -152,10 +155,11 @@ $("login-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   $("login-status").textContent = "Logging in...";
   const { error } = await sb.auth.signInWithPassword({
-    email: $("email").value.trim(),
+    email: ADMIN_EMAIL,
     password: $("password").value,
   });
-  $("login-status").textContent = error ? error.message : "";
+  $("password").value = "";
+  $("login-status").textContent = error ? "Wrong password." : "";
   if (!error) await showView();
 });
 

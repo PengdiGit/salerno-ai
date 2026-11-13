@@ -12,7 +12,7 @@ const MAX_TURNS = 12;
 const MAX_MESSAGE_CHARS = 2000;
 // Gemini's URL context tool accepts at most 20 URLs per request.
 const MAX_INFO_LINKS = 20;
-const INFO_LINK_RE = /^\s*I\s*-\s*[*<]?(https?:\/\/[^\s*>]+)[*>]?\s*$/gim;
+const INFO_LINK_RE = /^\s*I\s*-\s*[*<]?((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/?#][^\s*>]*)?)[*>]?\s*$/gim;
 // "IMG - factory.png" or "IMG - factory.png - caption"; files live in docs/images/ on the website.
 const IMAGE_RE = /^\s*IMG\s*-\s*([\w./-]+\.(?:png|jpe?g|gif|webp))\s*(?:-\s*(.+?))?\s*$/gim;
 
@@ -84,12 +84,19 @@ function words(text: string) {
   );
 }
 
-// Picks "I - <url>" links from the knowledge entries that best match the question.
+function infoLinksIn(text: string) {
+  return [...text.matchAll(INFO_LINK_RE)].map((m) => (/^https?:\/\//i.test(m[1]) ? m[1] : `https://${m[1]}`));
+}
+
+// Picks "I - <url>" links: all of them if they fit, otherwise the ones from entries that best match the question.
 function pickInfoLinks(rows: KnowledgeRow[], question: string): string[] {
+  const all = [...new Set(rows.flatMap((r) => infoLinksIn(r.content)))];
+  if (all.length <= MAX_INFO_LINKS) return all;
+
   const q = words(question);
   const scored = rows
     .map((row) => {
-      const links = [...row.content.matchAll(INFO_LINK_RE)].map((m) => m[1]);
+      const links = infoLinksIn(row.content);
       if (!links.length) return null;
       const titleWords = words(row.title);
       const bodyWords = words(row.content);

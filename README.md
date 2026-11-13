@@ -2,7 +2,7 @@
 
 A chatbot for players of Salerno on CivMC. Ask it about Civ mechanics and Salerno (government, places, shops, history).
 
-- `docs/` is the website (GitHub Pages): `index.html` is the chat, `admin.html` edits the knowledge.
+- `docs/` is the website (GitHub Pages): `index.html` is the chat, `/admin` (not linked anywhere, password only) edits the knowledge.
 - `supabase/functions/chat/` is the backend. It loads the knowledge, calls Gemini, and streams the answer back.
 - `supabase/migrations/` is the database setup.
 - `knowledge/` holds the knowledge files (`.md` or `.txt`). See `knowledge/_TEMPLATE.md`.
@@ -18,7 +18,10 @@ To show pictures, put them in `docs/images/` and add a line like `IMG - brunsvik
 node scripts/seed.mjs --dry-run   # preview
 node scripts/seed.mjs             # upload all files
 node scripts/seed.mjs government  # upload only files with "government" in the name
+node scripts/seed.mjs --sql       # print SQL to paste into the Supabase SQL editor (no secret key needed)
 ```
+
+Knowledge files are git-ignored so they don't end up in the public repo (only `_TEMPLATE.md` is committed). Empty files are skipped.
 
 Re-uploading a file replaces the entries that came from it. Entries made on the admin page are not touched.
 
@@ -43,7 +46,7 @@ Re-uploading a file replaces the entries that came from it. Entries made on the 
    Optional secrets: `GEMINI_MODEL` (default `gemini-3.5-flash`), `GEMINI_FALLBACK_MODEL` (default `gemini-flash-lite-latest`, used when the main model is busy), `ALLOWED_ORIGINS` (e.g. `https://pengdigit.github.io`), `RATE_LIMIT_MAX` (default 20), `RATE_LIMIT_WINDOW_SECONDS` (default 600), `USE_WEB_SEARCH` (default `false`; Google Search grounding needs a paid Gemini plan).
 4. Put the project URL and anon/publishable key in `docs/config.js`.
 5. Copy `.env.example` to `.env`, fill it in, and run `node scripts/seed.mjs`.
-6. For the admin page: create your user in Supabase under Authentication > Users, then run this in the SQL editor:
+6. The admin page signs in as the single account `admin@salerno-ai.app` (set in `docs/admin/admin.js`); only the password is typed. To add an admin, create the user in Authentication > Users and run:
    ```sql
-   insert into admins (user_id, name) values ('YOUR-USER-UUID', 'Pengdi');
+   insert into admins (user_id, name) values ('USER-UUID', 'Name');
    ```
