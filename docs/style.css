@@ -82,10 +82,11 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 .welcome h2 { color: var(--text); margin-bottom: 6px; }
 .suggestions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
   margin-top: 16px;
 }
+@media (max-width: 560px) { .suggestions { grid-template-columns: 1fr; } }
 .suggestion {
   background: var(--panel);
   color: var(--text);
