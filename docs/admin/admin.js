@@ -1,6 +1,3 @@
-// Single admin account; only the password is typed in.
-const ADMIN_EMAIL = "admin@salerno-ai.app";
-
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const $ = (id) => document.getElementById(id);

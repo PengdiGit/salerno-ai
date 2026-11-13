@@ -6,6 +6,11 @@ const welcomeEl = document.getElementById("welcome");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send-btn");
+const gateEl = document.getElementById("gate");
+const appEl = document.getElementById("app");
+const logoutBtn = document.getElementById("logout-btn");
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let history = loadHistory();
 let busy = false;
@@ -121,12 +126,21 @@ async function ask(question) {
   let answer = "";
   let sources = [];
   try {
+    const headers = { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY };
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) headers.Authorization = `Bearer ${session.access_token}`;
+
     const res = await fetch(CHAT_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+      headers,
       body: JSON.stringify({ messages: history.slice(-MAX_HISTORY) }),
     });
 
+    if (res.status === 401 || res.status === 403) {
+      await sb.auth.signOut();
+      showGate("Please log in again.");
+      throw new Error("Your login expired. Log in and ask again.");
+    }
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Request failed (${res.status})`);
@@ -203,5 +217,44 @@ document.getElementById("clear-btn").addEventListener("click", () => {
   input.focus();
 });
 
+function showGate(message = "") {
+  appEl.hidden = true;
+  gateEl.hidden = false;
+  document.getElementById("gate-status").textContent = message;
+  document.getElementById("gate-password").focus();
+}
+
+function showApp() {
+  gateEl.hidden = true;
+  appEl.hidden = false;
+  logoutBtn.hidden = !REQUIRE_LOGIN;
+  input.focus();
+}
+
+document.getElementById("gate-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const pw = document.getElementById("gate-password");
+  const status = document.getElementById("gate-status");
+  status.textContent = "Checking...";
+  const { error } = await sb.auth.signInWithPassword({ email: ADMIN_EMAIL, password: pw.value });
+  pw.value = "";
+  if (error) {
+    status.textContent = "Wrong password.";
+    return;
+  }
+  showApp();
+});
+
+logoutBtn.addEventListener("click", async () => {
+  await sb.auth.signOut();
+  showGate();
+});
+
 for (const m of history) addMessage(m.role, m.text);
-input.focus();
+
+(async () => {
+  if (!REQUIRE_LOGIN) return showApp();
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) showApp();
+  else showGate();
+})();

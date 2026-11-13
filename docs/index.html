@@ -4,10 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Salerno AI</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
-  <div class="app">
+  <div id="gate" class="gate" hidden>
+    <form id="gate-form" class="card">
+      <div class="brand">
+        <span class="logo">S</span>
+        <div>
+          <h1>Salerno AI</h1>
+          <p>Enter the password to continue</p>
+        </div>
+      </div>
+      <input id="gate-password" type="password" placeholder="Password" required autocomplete="current-password">
+      <button class="btn" type="submit">Enter</button>
+      <p id="gate-status" class="status"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
     <header>
       <div class="brand">
         <span class="logo">S</span>
@@ -16,7 +31,10 @@
           <p>Ask about CivMC and the nation of Salerno</p>
         </div>
       </div>
-      <button id="clear-btn" class="ghost" title="Start a new conversation">New chat</button>
+      <div class="row">
+        <button id="clear-btn" class="ghost" title="Start a new conversation">New chat</button>
+        <button id="logout-btn" class="ghost" hidden>Log out</button>
+      </div>
     </header>
 
     <main id="messages">
@@ -41,7 +59,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <script src="config.js?v=2"></script>
-  <script src="chat.js?v=2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js?v=3"></script>
+  <script src="chat.js?v=3"></script>
 </body>
 </html>
