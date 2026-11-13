@@ -116,6 +116,14 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 .bubble a { color: var(--accent); }
 .bubble code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
 .bubble pre { background: var(--panel-2); padding: 10px; border-radius: 8px; overflow-x: auto; }
+.bubble .img-link { display: block; margin: 8px 0; }
+.bubble img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
 
 .sources {
   margin-top: 10px;

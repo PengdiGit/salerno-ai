@@ -12,6 +12,8 @@ A chatbot for players of Salerno on CivMC. Ask it about Civ mechanics and Salern
 
 Each `# Heading` line starts a new entry. A line like `I - https://some-page` makes the bot read that page when a question is related to it. The file name becomes the category.
 
+To show pictures, put them in `docs/images/` and add a line like `IMG - brunsvik-factory.png - The Brunsvik factory building` (the caption is optional). Use `.png`, `.jpg`, `.gif` or `.webp`, with no spaces in the file name. Commit and push the image so it's live on the site. The bot only shows images that are listed in the knowledge.
+
 ```
 node scripts/seed.mjs --dry-run   # preview
 node scripts/seed.mjs             # upload all files

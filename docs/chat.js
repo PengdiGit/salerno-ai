@@ -31,8 +31,28 @@ function renderMarkdown(text) {
     a.target = "_blank";
     a.rel = "noopener noreferrer";
   }
+  for (const img of wrapper.querySelectorAll("img")) {
+    const src = img.getAttribute("src") || "";
+    if (!/^images\/[\w./-]+$/.test(src) || src.includes("..")) {
+      img.remove();
+      continue;
+    }
+    img.loading = "lazy";
+    const link = document.createElement("a");
+    link.href = src;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.className = "img-link";
+    img.replaceWith(link);
+    link.appendChild(img);
+  }
   return wrapper.innerHTML;
 }
+
+// Hide images that fail to load (e.g. a file name the bot got wrong).
+messagesEl.addEventListener("error", (e) => {
+  if (e.target.tagName === "IMG") (e.target.closest(".img-link") || e.target).remove();
+}, true);
 
 function addMessage(role, text) {
   welcomeEl.hidden = true;
