@@ -1,11 +1,12 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-flash-latest";
+const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-3.5-flash";
+const GEMINI_FALLBACK_MODEL = Deno.env.get("GEMINI_FALLBACK_MODEL") ?? "gemini-flash-lite-latest";
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "*").split(",").map((s) => s.trim());
 const RATE_MAX = Number(Deno.env.get("RATE_LIMIT_MAX") ?? 20);
 const RATE_WINDOW_SECONDS = Number(Deno.env.get("RATE_LIMIT_WINDOW_SECONDS") ?? 600);
-const USE_WEB_SEARCH = (Deno.env.get("USE_WEB_SEARCH") ?? "true") === "true";
+// Google Search grounding needs a paid Gemini plan; free-tier keys get 429 with it.
+const USE_WEB_SEARCH = (Deno.env.get("USE_WEB_SEARCH") ?? "false") === "true";
 
 const MAX_TURNS = 12;
 const MAX_MESSAGE_CHARS = 2000;
@@ -20,6 +21,17 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   { auth: { persistSession: false } },
 );
+
+let geminiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
+
+// Falls back to the "gemini_api_key" secret in Supabase Vault when the env secret isn't set.
+async function getGeminiKey() {
+  if (geminiKey) return geminiKey;
+  const { data, error } = await supabase.rpc("get_secret", { p_name: "gemini_api_key" });
+  if (error) console.error("vault error", error);
+  geminiKey = typeof data === "string" ? data : "";
+  return geminiKey;
+}
 
 type ChatMessage = { role: "user" | "model"; text: string };
 type KnowledgeRow = { id: number; category: string; title: string; content: string; updated_at: string };
@@ -118,7 +130,7 @@ Today's date is ${today}.
 
 Rules:
 - For anything about Salerno (its government, people, laws, cities, buildings, shops, history), answer ONLY from the knowledge base below or the info pages provided. If the answer is not there, say you don't know and suggest asking Salerno staff. Never invent names, leaders, coordinates or prices.
-- For general CivMC mechanics, use the knowledge base first, then the provided info pages, then web search (prefer the CivMC / Civ wiki).
+- For general CivMC mechanics, use the knowledge base first, then the provided info pages, then your own knowledge of CivMC / Civ servers (say when you are less sure, and point to the CivWiki).
 - Lines in the knowledge base that look like "I - <link>" are info pages. When you used one, mention the link so the player can read more.
 - Lines starting with "Image available:" contain a Markdown image. When your answer is about that thing, include that image by copying its Markdown exactly, on its own line. Never make up image paths and never use images from anywhere else.
 - Facts can go out of date; when relevant, mention when the info was last updated.
@@ -133,7 +145,8 @@ ${kb || "(empty)"}
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(req) });
   if (req.method !== "POST") return json(req, 405, { error: "Method not allowed" });
-  if (!GEMINI_API_KEY) return json(req, 500, { error: "Server is missing GEMINI_API_KEY" });
+  const apiKey = await getGeminiKey();
+  if (!apiKey) return json(req, 500, { error: "Server is missing the Gemini API key" });
 
   let body: unknown;
   try {
@@ -176,28 +189,42 @@ Deno.serve(async (req) => {
     return { role: m.role, parts: [{ text }] };
   });
 
-  const tools: Record<string, unknown>[] = [];
-  if (infoLinks.length) tools.push({ url_context: {} });
-  if (USE_WEB_SEARCH) tools.push({ google_search: {} });
+  const baseTools: Record<string, unknown>[] = infoLinks.length ? [{ url_context: {} }] : [];
+  const systemPrompt = buildSystemPrompt(rows ?? []);
 
-  const geminiRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: buildSystemPrompt(rows ?? []) }] },
-        contents,
-        tools,
-        generationConfig: { temperature: 0.4, maxOutputTokens: 2048 },
-      }),
-    },
-  );
+  // Busy (503) or over quota (429): retry without web search, then with the lighter fallback model.
+  const attempts: { model: string; tools: Record<string, unknown>[] }[] = [];
+  if (USE_WEB_SEARCH) attempts.push({ model: GEMINI_MODEL, tools: [...baseTools, { google_search: {} }] });
+  attempts.push({ model: GEMINI_MODEL, tools: baseTools });
+  attempts.push({ model: GEMINI_FALLBACK_MODEL, tools: baseTools });
 
-  if (!geminiRes.ok || !geminiRes.body) {
-    console.error("gemini error", geminiRes.status, await geminiRes.text());
-    return json(req, 502, { error: "The AI service had a problem. Try again in a moment." });
+  let geminiRes: Response | null = null;
+  for (const attempt of attempts) {
+    geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${attempt.model}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          ...(attempt.tools.length ? { tools: attempt.tools } : {}),
+          generationConfig: { temperature: 0.4, maxOutputTokens: 2048 },
+        }),
+      },
+    );
+    if (geminiRes.ok && geminiRes.body) break;
+    console.error("gemini error", attempt.model, geminiRes.status, await geminiRes.text());
+    if (geminiRes.status !== 429 && geminiRes.status !== 503) break;
   }
+
+  if (!geminiRes?.ok || !geminiRes.body) {
+    const busy = geminiRes?.status === 429 || geminiRes?.status === 503;
+    return json(req, 502, {
+      error: busy ? "The AI is busy right now. Try again in a minute." : "The AI service had a problem. Try again in a moment.",
+    });
+  }
+  const geminiBody = geminiRes.body;
 
   // Re-emit Gemini's SSE stream as newline-delimited JSON: {"text": "..."} chunks, then {"sources": [...]}.
   const encoder = new TextEncoder();
@@ -207,7 +234,7 @@ Deno.serve(async (req) => {
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
-      const reader = geminiRes.body!.getReader();
+      const reader = geminiBody.getReader();
       let buffer = "";
       try {
         while (true) {

@@ -31,12 +31,16 @@ Re-uploading a file replaces the entries that came from it. Entries made on the 
    supabase link --project-ref YOUR-PROJECT-REF
    supabase db push
    ```
-3. Give the backend your Gemini key (from https://aistudio.google.com/apikey) and deploy it:
+3. Give the backend your Gemini key (from https://aistudio.google.com/apikey) and deploy it. The key can be either a function secret or a Vault secret named `gemini_api_key` (this project currently uses Vault):
    ```
    supabase secrets set GEMINI_API_KEY=your-key
    supabase functions deploy chat
    ```
-   Optional secrets: `GEMINI_MODEL` (default `gemini-flash-latest`), `ALLOWED_ORIGINS` (e.g. `https://pengdigit.github.io`), `RATE_LIMIT_MAX` (default 20), `RATE_LIMIT_WINDOW_SECONDS` (default 600), `USE_WEB_SEARCH` (default `true`).
+   ```sql
+   -- or, in the SQL editor (to replace it later: select vault.update_secret(id, 'new-key') from vault.secrets where name = 'gemini_api_key';)
+   select vault.create_secret('your-key', 'gemini_api_key');
+   ```
+   Optional secrets: `GEMINI_MODEL` (default `gemini-3.5-flash`), `GEMINI_FALLBACK_MODEL` (default `gemini-flash-lite-latest`, used when the main model is busy), `ALLOWED_ORIGINS` (e.g. `https://pengdigit.github.io`), `RATE_LIMIT_MAX` (default 20), `RATE_LIMIT_WINDOW_SECONDS` (default 600), `USE_WEB_SEARCH` (default `false`; Google Search grounding needs a paid Gemini plan).
 4. Put the project URL and anon/publishable key in `docs/config.js`.
 5. Copy `.env.example` to `.env`, fill it in, and run `node scripts/seed.mjs`.
 6. For the admin page: create your user in Supabase under Authentication > Users, then run this in the SQL editor:
