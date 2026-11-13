@@ -37,9 +37,12 @@ function renderMarkdown(text) {
       img.remove();
       continue;
     }
+    const storageUrl = `${SUPABASE_URL}/storage/v1/object/public/${src}`;
+    img.src = storageUrl;
+    img.dataset.localSrc = src;
     img.loading = "lazy";
     const link = document.createElement("a");
-    link.href = src;
+    link.href = storageUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.className = "img-link";
@@ -49,9 +52,17 @@ function renderMarkdown(text) {
   return wrapper.innerHTML;
 }
 
-// Hide images that fail to load (e.g. a file name the bot got wrong).
+// Uploaded images live in Supabase Storage; if one isn't there, try docs/images/ in the repo, then hide it.
 messagesEl.addEventListener("error", (e) => {
-  if (e.target.tagName === "IMG") (e.target.closest(".img-link") || e.target).remove();
+  const img = e.target;
+  if (img.tagName !== "IMG") return;
+  const local = img.dataset.localSrc;
+  if (local && img.getAttribute("src") !== local) {
+    img.src = local;
+    img.closest(".img-link")?.setAttribute("href", local);
+    return;
+  }
+  (img.closest(".img-link") || img).remove();
 }, true);
 
 function addMessage(role, text) {

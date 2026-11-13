@@ -30,8 +30,113 @@ async function showView() {
 
   loginView.hidden = true;
   editorView.hidden = false;
-  await loadEntries();
+  await Promise.all([loadEntries(), loadImages()]);
 }
+
+// ---------- images (Supabase Storage bucket "images")
+const bucket = sb.storage.from("images");
+
+function cleanFileName(name, originalName) {
+  const ext = (originalName.match(/\.(png|jpe?g|gif|webp)$/i)?.[1] ?? "png").toLowerCase();
+  const base = (name || originalName.replace(/\.[^.]+$/, ""))
+    .toLowerCase()
+    .replace(/\.(png|jpe?g|gif|webp)$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${base || "image"}.${ext}`;
+}
+
+async function loadImages() {
+  const grid = $("images");
+  const { data, error } = await bucket.list("", { limit: 1000, sortBy: { column: "name", order: "asc" } });
+  if (error) {
+    grid.textContent = `Could not load images: ${error.message}`;
+    return;
+  }
+  grid.innerHTML = "";
+  const files = data.filter((f) => f.id && !f.name.startsWith("."));
+  if (!files.length) grid.textContent = "No images yet.";
+
+  for (const f of files) {
+    const url = bucket.getPublicUrl(f.name).data.publicUrl;
+    const line = `IMG - ${f.name}`;
+
+    const card = document.createElement("div");
+    card.className = "image-card";
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    const img = document.createElement("img");
+    img.src = `${url}?v=${encodeURIComponent(f.updated_at ?? "")}`;
+    img.alt = f.name;
+    img.loading = "lazy";
+    link.appendChild(img);
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = f.name;
+
+    const actions = document.createElement("div");
+    actions.className = "row";
+    const add = document.createElement("button");
+    add.className = "btn";
+    add.type = "button";
+    add.textContent = "Add to entry";
+    add.onclick = () => {
+      const box = $("entry-content");
+      box.value = `${box.value.replace(/\s+$/, "")}${box.value.trim() ? "\n" : ""}${line} - `;
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    };
+    const copy = document.createElement("button");
+    copy.className = "ghost";
+    copy.type = "button";
+    copy.textContent = "Copy line";
+    copy.onclick = async () => {
+      await navigator.clipboard.writeText(line);
+      copy.textContent = "Copied";
+      setTimeout(() => (copy.textContent = "Copy line"), 1200);
+    };
+    const del = document.createElement("button");
+    del.className = "btn danger";
+    del.type = "button";
+    del.textContent = "Delete";
+    del.onclick = async () => {
+      if (!confirm(`Delete ${f.name}? Entries that use it will stop showing it.`)) return;
+      const { error } = await bucket.remove([f.name]);
+      if (error) return alert(error.message);
+      await loadImages();
+    };
+    actions.append(add, copy, del);
+
+    card.append(link, name, actions);
+    grid.appendChild(card);
+  }
+}
+
+$("upload-btn").addEventListener("click", async () => {
+  const file = $("image-file").files[0];
+  const status = $("image-status");
+  if (!file) {
+    status.textContent = "Pick a file first.";
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    status.textContent = "That file is over 5 MB. Shrink or crop it first.";
+    return;
+  }
+  const name = cleanFileName($("image-name").value.trim(), file.name);
+  status.textContent = `Uploading ${name}...`;
+  const { error } = await bucket.upload(name, file, { upsert: true, contentType: file.type, cacheControl: "300" });
+  if (error) {
+    status.textContent = `Upload failed: ${error.message}`;
+    return;
+  }
+  status.textContent = `Uploaded. Use this line in an entry: IMG - ${name}`;
+  $("image-file").value = "";
+  $("image-name").value = "";
+  await loadImages();
+});
 
 async function loadEntries() {
   const { data, error } = await sb
