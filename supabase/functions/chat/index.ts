@@ -17,6 +17,12 @@ const MAX_INFO_LINKS = 20;
 const INFO_LINK_RE = /^\s*I\s*-\s*[*<]?((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/?#][^\s*>]*)?)[*>]?\s*$/gim;
 // "IMG - factory.png" or "IMG - factory.png - caption"; files live in docs/images/ on the website.
 const IMAGE_RE = /^\s*IMG\s*-\s*([\w./-]+\.(?:png|jpe?g|gif|webp))\s*(?:-\s*(.+?))?\s*$/gim;
+// "DOC - https://docs.google.com/document/d/<id>/edit" — always fetched and inlined into the knowledge base.
+const DOC_LINE =
+  /^\s*DOC\s*-\s*((?:https?:\/\/)?docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)[^\s]*)\s*$/i;
+const DOC_CACHE_TTL_MS = 5 * 60_000;
+const DOC_FETCH_TIMEOUT_MS = 10_000;
+const DOC_MAX_CHARS = 200_000;
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -49,6 +55,88 @@ async function listImages() {
   return imageCache.names;
 }
 
+type ChatMessage = { role: "user" | "model"; text: string };
+type KnowledgeRow = { id: number; category: string; title: string; content: string; updated_at: string };
+type DocCacheEntry = { text: string; at: number };
+const docCache = new Map<string, DocCacheEntry>();
+
+function normalizeDocUrl(raw: string) {
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+// Plain-text export of a public Google Doc. Falls back to the last cached copy on failure.
+async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
+  const cached = docCache.get(id);
+  if (cached && Date.now() - cached.at < DOC_CACHE_TTL_MS) return cached.text;
+
+  const exportUrl = `https://docs.google.com/document/d/${id}/export?format=txt`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOC_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(exportUrl, {
+      signal: controller.signal,
+      headers: { "User-Agent": "SalernoAI/1.0" },
+      redirect: "follow",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = (await res.text()).slice(0, DOC_MAX_CHARS).trim();
+    const ctype = res.headers.get("content-type") ?? "";
+    // Private docs often return a login HTML page with status 200.
+    if (!raw || /html/i.test(ctype) || /^<!DOCTYPE|^<html/i.test(raw)) {
+      throw new Error("not a public plain-text export (share as Anyone with the link can view)");
+    }
+    docCache.set(id, { text: raw, at: Date.now() });
+    return raw;
+  } catch (err) {
+    console.error("google doc fetch error", id, err);
+    if (cached?.text) return cached.text;
+    return `(document could not be loaded: ${sourceUrl})`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function docMatches(content: string) {
+  const out: { rawUrl: string; id: string }[] = [];
+  for (const line of content.split("\n")) {
+    const m = line.match(DOC_LINE);
+    if (m) out.push({ rawUrl: m[1], id: m[2] });
+  }
+  return out;
+}
+
+// Replaces every "DOC - <url>" line with the live document text (fetched in parallel).
+async function expandDocs(rows: KnowledgeRow[]): Promise<KnowledgeRow[]> {
+  const needed = new Map<string, string>(); // id -> source url
+  for (const row of rows) {
+    for (const { rawUrl, id } of docMatches(row.content)) {
+      needed.set(id, normalizeDocUrl(rawUrl));
+    }
+  }
+  if (!needed.size) return rows;
+
+  const texts = new Map<string, string>();
+  await Promise.all(
+    [...needed].map(async ([id, url]) => {
+      texts.set(id, await fetchDocText(id, url));
+    }),
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    content: row.content
+      .split("\n")
+      .map((line) => {
+        const m = line.match(DOC_LINE);
+        if (!m) return line;
+        const url = normalizeDocUrl(m[1]);
+        const body = texts.get(m[2]) ?? `(document could not be loaded: ${url})`;
+        return `Source document: ${url}\n${body}`;
+      })
+      .join("\n"),
+  }));
+}
+
 async function isAdminRequest(req: Request) {
   const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   if (!token) return false;
@@ -57,9 +145,6 @@ async function isAdminRequest(req: Request) {
   const { data: admin } = await supabase.from("admins").select("user_id").eq("user_id", data.user.id).maybeSingle();
   return !!admin;
 }
-
-type ChatMessage = { role: "user" | "model"; text: string };
-type KnowledgeRow = { id: number; category: string; title: string; content: string; updated_at: string };
 
 function corsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("origin") ?? "";
@@ -172,6 +257,7 @@ Rules:
 - For anything about Salerno (its government, people, laws, cities, buildings, shops, history), answer ONLY from the knowledge base below or the info pages provided. If the answer is not there, say you don't know and suggest asking Salerno staff. Never invent names, leaders, coordinates or prices.
 - For general CivMC mechanics, use the knowledge base first, then the provided info pages, then your own knowledge of CivMC / Civ servers (say when you are less sure, and point to the CivWiki).
 - Lines in the knowledge base that look like "I - <link>" are info pages. When you used one, or it is where the player should go, share it as a normal Markdown link like [civshops.pengworld.net](https://civshops.pengworld.net), never with the "I -" prefix.
+- Entries that include "Source document: <link>" are live legal or official documents (laws, constitution, etc.). When answering from them, quote or point to the specific article or section, and share the document link as a normal Markdown link so the player can read the source.
 - Do not add citation tags, topic names or brackets like [topic] to your answer.
 - Lines starting with "Image available:" contain a Markdown image. When your answer is about that thing, ALWAYS include that image by copying its Markdown exactly, on its own line at the end of the answer. Never make up image paths and never use images from anywhere else.
 - Only mention when info was last updated if it is about something that changes often (leaders, prices, wars) or it is more than 3 months old.
@@ -220,8 +306,9 @@ Deno.serve(async (req) => {
     return json(req, 500, { error: "Could not load knowledge base" });
   }
 
+  const knowledge = await expandDocs(rows ?? []);
   const question = messages[messages.length - 1].text;
-  const infoLinks = pickInfoLinks(rows ?? [], question);
+  const infoLinks = pickInfoLinks(knowledge, question);
 
   const contents = messages.map((m, i) => {
     let text = m.text;
@@ -232,7 +319,7 @@ Deno.serve(async (req) => {
   });
 
   const baseTools: Record<string, unknown>[] = infoLinks.length ? [{ url_context: {} }] : [];
-  const systemPrompt = buildSystemPrompt(rows ?? [], await listImages());
+  const systemPrompt = buildSystemPrompt(knowledge, await listImages());
 
   // Busy (503) or over quota (429): retry without web search, then with the lighter fallback model.
   const attempts: { model: string; tools: Record<string, unknown>[] }[] = [];
