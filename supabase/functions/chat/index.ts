@@ -21,8 +21,10 @@ const IMAGE_RE = /^\s*IMG\s*-\s*([\w./-]+\.(?:png|jpe?g|gif|webp))\s*(?:-\s*(.+?
 const DOC_LINE =
   /^\s*DOC\s*-\s*((?:https?:\/\/)?docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)[^\s]*)\s*$/i;
 const DOC_CACHE_TTL_MS = 5 * 60_000;
-const DOC_FETCH_TIMEOUT_MS = 10_000;
+const DOC_FETCH_TIMEOUT_MS = 4_000;
 const DOC_MAX_CHARS = 200_000;
+// Cap how many Google Docs we expand into the prompt per question (keeps replies fast).
+const MAX_DOCS_PER_REQUEST = 3;
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -60,15 +62,52 @@ type KnowledgeRow = { id: number; category: string; title: string; content: stri
 type DocCacheEntry = { text: string; at: number };
 const docCache = new Map<string, DocCacheEntry>();
 
+// Supabase Edge Runtime background work (refresh cache without delaying the reply).
+declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
+
 function normalizeDocUrl(raw: string) {
   return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
 }
 
-// Plain-text export of a public Google Doc. Falls back to the last cached copy on failure.
-async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
-  const cached = docCache.get(id);
-  if (cached && Date.now() - cached.at < DOC_CACHE_TTL_MS) return cached.text;
+function docMatches(content: string) {
+  const out: { rawUrl: string; id: string }[] = [];
+  for (const line of content.split("\n")) {
+    const m = line.match(DOC_LINE);
+    if (m) out.push({ rawUrl: m[1], id: m[2] });
+  }
+  return out;
+}
 
+function rememberDoc(id: string, text: string, at = Date.now()) {
+  docCache.set(id, { text, at });
+}
+
+async function loadDocFromDb(id: string): Promise<DocCacheEntry | null> {
+  const { data, error } = await supabase
+    .from("doc_cache")
+    .select("text, fetched_at")
+    .eq("doc_id", id)
+    .maybeSingle();
+  if (error) {
+    console.error("doc_cache read error", id, error);
+    return null;
+  }
+  if (!data?.text) return null;
+  const at = Date.parse(data.fetched_at) || 0;
+  rememberDoc(id, data.text, at);
+  return { text: data.text, at };
+}
+
+async function saveDocToDb(id: string, text: string) {
+  const { error } = await supabase.from("doc_cache").upsert({
+    doc_id: id,
+    text,
+    fetched_at: new Date().toISOString(),
+  });
+  if (error) console.error("doc_cache write error", id, error);
+}
+
+async function downloadDocText(id: string): Promise<string> {
   const exportUrl = `https://docs.google.com/document/d/${id}/export?format=txt`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOC_FETCH_TIMEOUT_MS);
@@ -85,39 +124,119 @@ async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
     if (!raw || /html/i.test(ctype) || /^<!DOCTYPE|^<html/i.test(raw)) {
       throw new Error("not a public plain-text export (share as Anyone with the link can view)");
     }
-    docCache.set(id, { text: raw, at: Date.now() });
     return raw;
-  } catch (err) {
-    console.error("google doc fetch error", id, err);
-    if (cached?.text) return cached.text;
-    return `(document could not be loaded: ${sourceUrl})`;
   } finally {
     clearTimeout(timer);
   }
 }
 
-function docMatches(content: string) {
-  const out: { rawUrl: string; id: string }[] = [];
-  for (const line of content.split("\n")) {
-    const m = line.match(DOC_LINE);
-    if (m) out.push({ rawUrl: m[1], id: m[2] });
-  }
-  return out;
+function scheduleDocRefresh(id: string) {
+  const work = (async () => {
+    try {
+      const text = await downloadDocText(id);
+      rememberDoc(id, text);
+      await saveDocToDb(id, text);
+    } catch (err) {
+      console.error("google doc background refresh error", id, err);
+    }
+  })();
+  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(work);
+  else work.catch(() => {});
 }
 
-// Replaces every "DOC - <url>" line with the live document text (fetched in parallel).
-async function expandDocs(rows: KnowledgeRow[]): Promise<KnowledgeRow[]> {
-  const needed = new Map<string, string>(); // id -> source url
+// Prefer cached text (memory then DB) so cold starts stay fast; only block on Google when nothing is cached.
+async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
+  const mem = docCache.get(id);
+  if (mem) {
+    if (Date.now() - mem.at >= DOC_CACHE_TTL_MS) scheduleDocRefresh(id);
+    return mem.text;
+  }
+
+  const db = await loadDocFromDb(id);
+  if (db) {
+    if (Date.now() - db.at >= DOC_CACHE_TTL_MS) scheduleDocRefresh(id);
+    return db.text;
+  }
+
+  try {
+    const text = await downloadDocText(id);
+    rememberDoc(id, text);
+    await saveDocToDb(id, text);
+    return text;
+  } catch (err) {
+    console.error("google doc fetch error", id, err);
+    return `(document could not be loaded: ${sourceUrl})`;
+  }
+}
+
+const LEGAL_HINT =
+  /\b(law|laws|legal|constitution|statute|statutes|article|section|amendment|code|bill|act|ordinance|charter|rights?|court|crime|criminal|civil|trial|sentence|ban|banned|illegal|allowed|permit|permission)\b/i;
+
+// Which DOC entries to expand for this question (avoids stuffing every law into every prompt).
+function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
+  const byId = new Map<string, { score: number; url: string }>();
+  const q = words(question);
+  const legalQ = LEGAL_HINT.test(question);
+
   for (const row of rows) {
-    for (const { rawUrl, id } of docMatches(row.content)) {
-      needed.set(id, normalizeDocUrl(rawUrl));
+    const docs = docMatches(row.content);
+    if (!docs.length) continue;
+    const titleWords = words(row.title);
+    const catWords = words(row.category);
+    const bodyWords = words(row.content.replace(DOC_LINE, " "));
+    let score = 0;
+    for (const w of q) {
+      if (titleWords.has(w)) score += 5;
+      else if (catWords.has(w)) score += 3;
+      else if (bodyWords.has(w)) score += 1;
+    }
+    if (legalQ && /\b(law|legal|constitution|government|statute)\b/i.test(`${row.category} ${row.title}`)) {
+      score += 2;
+    }
+    for (const { id, rawUrl } of docs) {
+      const prev = byId.get(id);
+      if (!prev || score > prev.score) byId.set(id, { score, url: normalizeDocUrl(rawUrl) });
     }
   }
-  if (!needed.size) return rows;
+
+  // Only expand docs that match this question (keeps non-law chats fast).
+  return new Set(
+    [...byId.entries()]
+      .filter(([, v]) => v.score > 0)
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, MAX_DOCS_PER_REQUEST)
+      .map(([id]) => id),
+  );
+}
+
+// Replaces relevant "DOC - <url>" lines with live text; others stay as a short link stub.
+async function expandDocs(rows: KnowledgeRow[], question: string): Promise<KnowledgeRow[]> {
+  const loadIds = pickDocIds(rows, question);
+  if (!loadIds.size) {
+    return rows.map((row) => ({
+      ...row,
+      content: row.content
+        .split("\n")
+        .map((line) => {
+          const m = line.match(DOC_LINE);
+          if (!m) return line;
+          const url = normalizeDocUrl(m[1]);
+          return `Source document: ${url} (full text not loaded for this question; ask about this document if needed)`;
+        })
+        .join("\n"),
+    }));
+  }
+
+  const urlById = new Map<string, string>();
+  for (const row of rows) {
+    for (const { id, rawUrl } of docMatches(row.content)) {
+      if (loadIds.has(id)) urlById.set(id, normalizeDocUrl(rawUrl));
+    }
+  }
 
   const texts = new Map<string, string>();
   await Promise.all(
-    [...needed].map(async ([id, url]) => {
+    [...urlById].map(async ([id, url]) => {
       texts.set(id, await fetchDocText(id, url));
     }),
   );
@@ -130,7 +249,11 @@ async function expandDocs(rows: KnowledgeRow[]): Promise<KnowledgeRow[]> {
         const m = line.match(DOC_LINE);
         if (!m) return line;
         const url = normalizeDocUrl(m[1]);
-        const body = texts.get(m[2]) ?? `(document could not be loaded: ${url})`;
+        const id = m[2];
+        if (!loadIds.has(id)) {
+          return `Source document: ${url} (full text not loaded for this question; ask about this document if needed)`;
+        }
+        const body = texts.get(id) ?? `(document could not be loaded: ${url})`;
         return `Source document: ${url}\n${body}`;
       })
       .join("\n"),
@@ -296,18 +419,18 @@ Deno.serve(async (req) => {
     return json(req, 429, { error: `Slow down! You can send ${RATE_MAX} messages every ${Math.round(RATE_WINDOW_SECONDS / 60)} minutes.` });
   }
 
-  const { data: rows, error: kbError } = await supabase
-    .from("knowledge")
-    .select("id, category, title, content, updated_at")
-    .order("category")
-    .order("id");
+  const question = messages[messages.length - 1].text;
+
+  const [{ data: rows, error: kbError }, imageNames] = await Promise.all([
+    supabase.from("knowledge").select("id, category, title, content, updated_at").order("category").order("id"),
+    listImages(),
+  ]);
   if (kbError) {
     console.error("knowledge load error", kbError);
     return json(req, 500, { error: "Could not load knowledge base" });
   }
 
-  const knowledge = await expandDocs(rows ?? []);
-  const question = messages[messages.length - 1].text;
+  const knowledge = await expandDocs(rows ?? [], question);
   const infoLinks = pickInfoLinks(knowledge, question);
 
   const contents = messages.map((m, i) => {
@@ -319,7 +442,7 @@ Deno.serve(async (req) => {
   });
 
   const baseTools: Record<string, unknown>[] = infoLinks.length ? [{ url_context: {} }] : [];
-  const systemPrompt = buildSystemPrompt(knowledge, await listImages());
+  const systemPrompt = buildSystemPrompt(knowledge, imageNames);
 
   // Busy (503) or over quota (429): retry without web search, then with the lighter fallback model.
   const attempts: { model: string; tools: Record<string, unknown>[] }[] = [];
