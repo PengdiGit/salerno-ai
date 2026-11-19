@@ -12,7 +12,7 @@ A chatbot for players of Salerno on CivMC. Ask it about Civ mechanics and Salern
 
 Each `# Heading` line starts a new entry. A line like `I - https://some-page` makes the bot read that page when a question is related to it. The file name becomes the category.
 
-A line like `DOC - https://docs.google.com/document/d/.../edit` pulls in a live Google Doc (laws, constitution, etc.). The doc must be shared as "Anyone with the link can view". The chat backend fetches the plain-text export only when the question seems related to that doc (up to 3 per request), caches it in the `doc_cache` table, and refreshes in the background about every 5 minutes so edits reach the bot without re-seeding.
+A line like `DOC - https://docs.google.com/document/d/.../edit` (or a bare Docs URL on its own line) pulls in a live Google Doc (laws, constitution, etc.). Pasting a Docs link in chat also makes the bot fetch and read that document. The doc must be shared as "Anyone with the link can view". The backend fetches the plain-text export when the question matches or includes the link (up to 3 per request), caches it in the `doc_cache` table, and refreshes in the background about every 5 minutes so edits reach the bot without re-seeding.
 
 To show pictures, upload them on the admin page (they go to the Supabase Storage bucket `images`) and add a line like `IMG - brunsvik-factory.png - The Brunsvik factory building` (the caption is optional). Images can also be committed to `docs/images/`; the chat checks Storage first, then that folder. Use `.png`, `.jpg`, `.gif` or `.webp`, with no spaces in the file name. The bot only shows images that are listed in the knowledge.
 

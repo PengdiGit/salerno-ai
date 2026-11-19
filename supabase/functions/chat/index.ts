@@ -17,11 +17,15 @@ const MAX_INFO_LINKS = 20;
 const INFO_LINK_RE = /^\s*I\s*-\s*[*<]?((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/?#][^\s*>]*)?)[*>]?\s*$/gim;
 // "IMG - factory.png" or "IMG - factory.png - caption"; files live in docs/images/ on the website.
 const IMAGE_RE = /^\s*IMG\s*-\s*([\w./-]+\.(?:png|jpe?g|gif|webp))\s*(?:-\s*(.+?))?\s*$/gim;
-// "DOC - https://docs.google.com/document/d/<id>/edit" — always fetched and inlined into the knowledge base.
+// "DOC - https://docs.google.com/document/d/<id>/edit" — fetched and inlined when relevant.
+// Also matches a bare Google Doc URL on its own knowledge line.
 const DOC_LINE =
-  /^\s*DOC\s*-\s*((?:https?:\/\/)?docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)[^\s]*)\s*$/i;
+  /^\s*(?:DOC\s*-\s*)?((?:https?:\/\/)?docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)(?:\/[^\s]*)?)\s*$/i;
+// Google Doc links anywhere in text (chat paste, middle of a sentence, etc.).
+const GOOGLE_DOC_URL_RE =
+  /(?:https?:\/\/)?docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)(?:\/[^\s<>*)\]]*)?/gi;
 const DOC_CACHE_TTL_MS = 5 * 60_000;
-const DOC_FETCH_TIMEOUT_MS = 4_000;
+const DOC_FETCH_TIMEOUT_MS = 8_000;
 const DOC_MAX_CHARS = 200_000;
 // Cap how many Google Docs we expand into the prompt per question (keeps replies fast).
 const MAX_DOCS_PER_REQUEST = 3;
@@ -66,14 +70,43 @@ const docCache = new Map<string, DocCacheEntry>();
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
 function normalizeDocUrl(raw: string) {
-  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  // Drop trailing punctuation that often comes with pasted links.
+  return withScheme.replace(/[),\].;]+$/g, "");
+}
+
+function canonicalDocUrl(id: string) {
+  return `https://docs.google.com/document/d/${id}/edit`;
+}
+
+function googleDocsIn(text: string): { id: string; url: string }[] {
+  const out: { id: string; url: string }[] = [];
+  const seen = new Set<string>();
+  GOOGLE_DOC_URL_RE.lastIndex = 0;
+  for (const m of text.matchAll(GOOGLE_DOC_URL_RE)) {
+    const id = m[1];
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, url: canonicalDocUrl(id) });
+  }
+  return out;
 }
 
 function docMatches(content: string) {
   const out: { rawUrl: string; id: string }[] = [];
+  const seen = new Set<string>();
   for (const line of content.split("\n")) {
     const m = line.match(DOC_LINE);
-    if (m) out.push({ rawUrl: m[1], id: m[2] });
+    if (m && !seen.has(m[2])) {
+      seen.add(m[2]);
+      out.push({ rawUrl: normalizeDocUrl(m[1]), id: m[2] });
+    }
+  }
+  // Also pick up DOC links that share a line with other notes.
+  for (const { id, url } of googleDocsIn(content)) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ rawUrl: url, id });
   }
   return out;
 }
@@ -172,18 +205,20 @@ async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
 const LEGAL_HINT =
   /\b(law|laws|legal|constitution|statute|statutes|article|section|amendment|code|bill|act|ordinance|charter|rights?|court|crime|criminal|civil|trial|sentence|ban|banned|illegal|allowed|permit|permission)\b/i;
 
-// Which DOC entries to expand for this question (avoids stuffing every law into every prompt).
+// Which knowledge DOC entries to expand for this question (avoids stuffing every law into every prompt).
 function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
   const byId = new Map<string, { score: number; url: string }>();
   const q = words(question);
   const legalQ = LEGAL_HINT.test(question);
+  const pasted = new Set(googleDocsIn(question).map((d) => d.id));
 
   for (const row of rows) {
     const docs = docMatches(row.content);
     if (!docs.length) continue;
     const titleWords = words(row.title);
     const catWords = words(row.category);
-    const bodyWords = words(row.content.replace(DOC_LINE, " "));
+    GOOGLE_DOC_URL_RE.lastIndex = 0;
+    const bodyWords = words(row.content.replace(GOOGLE_DOC_URL_RE, " "));
     let score = 0;
     for (const w of q) {
       if (titleWords.has(w)) score += 5;
@@ -194,12 +229,13 @@ function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
       score += 2;
     }
     for (const { id, rawUrl } of docs) {
+      // User pasted this doc's link in chat → always load it.
+      const finalScore = pasted.has(id) ? Math.max(score, 100) : score;
       const prev = byId.get(id);
-      if (!prev || score > prev.score) byId.set(id, { score, url: normalizeDocUrl(rawUrl) });
+      if (!prev || finalScore > prev.score) byId.set(id, { score: finalScore, url: normalizeDocUrl(rawUrl) });
     }
   }
 
-  // Only expand docs that match this question (keeps non-law chats fast).
   return new Set(
     [...byId.entries()]
       .filter(([, v]) => v.score > 0)
@@ -209,22 +245,41 @@ function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
   );
 }
 
-// Replaces relevant "DOC - <url>" lines with live text; others stay as a short link stub.
+function stubDocLine(url: string) {
+  return `Source document: ${url} (full text not loaded for this question; ask about this document or paste its link if needed)`;
+}
+
+function replaceDocLines(content: string, loadIds: Set<string>, texts: Map<string, string>) {
+  return content
+    .split("\n")
+    .map((line) => {
+      const m = line.match(DOC_LINE);
+      if (m) {
+        const url = normalizeDocUrl(m[1]);
+        const id = m[2];
+        if (!loadIds.has(id)) return stubDocLine(url);
+        const body = texts.get(id) ?? `(document could not be loaded: ${url})`;
+        return `Source document: ${url}\n${body}`;
+      }
+      // DOC URL sharing a line with other text → expand in place when loaded.
+      GOOGLE_DOC_URL_RE.lastIndex = 0;
+      return line.replace(GOOGLE_DOC_URL_RE, (_full, id: string) => {
+        const url = canonicalDocUrl(id);
+        if (!loadIds.has(id)) return stubDocLine(url);
+        const body = texts.get(id) ?? `(document could not be loaded: ${url})`;
+        return `Source document: ${url}\n${body}`;
+      });
+    })
+    .join("\n");
+}
+
+// Replaces relevant knowledge DOC links with live text; fetches Google Doc links pasted in the question too.
 async function expandDocs(rows: KnowledgeRow[], question: string): Promise<KnowledgeRow[]> {
   const loadIds = pickDocIds(rows, question);
-  if (!loadIds.size) {
-    return rows.map((row) => ({
-      ...row,
-      content: row.content
-        .split("\n")
-        .map((line) => {
-          const m = line.match(DOC_LINE);
-          if (!m) return line;
-          const url = normalizeDocUrl(m[1]);
-          return `Source document: ${url} (full text not loaded for this question; ask about this document if needed)`;
-        })
-        .join("\n"),
-    }));
+  const pasted = googleDocsIn(question);
+  for (const { id } of pasted) {
+    if (loadIds.size >= MAX_DOCS_PER_REQUEST) break;
+    loadIds.add(id);
   }
 
   const urlById = new Map<string, string>();
@@ -233,31 +288,38 @@ async function expandDocs(rows: KnowledgeRow[], question: string): Promise<Knowl
       if (loadIds.has(id)) urlById.set(id, normalizeDocUrl(rawUrl));
     }
   }
+  for (const { id, url } of pasted) {
+    if (loadIds.has(id)) urlById.set(id, url);
+  }
 
   const texts = new Map<string, string>();
-  await Promise.all(
-    [...urlById].map(async ([id, url]) => {
-      texts.set(id, await fetchDocText(id, url));
-    }),
-  );
+  if (urlById.size) {
+    await Promise.all(
+      [...urlById].map(async ([id, url]) => {
+        texts.set(id, await fetchDocText(id, url));
+      }),
+    );
+  }
 
-  return rows.map((row) => ({
+  const expanded = rows.map((row) => ({
     ...row,
-    content: row.content
-      .split("\n")
-      .map((line) => {
-        const m = line.match(DOC_LINE);
-        if (!m) return line;
-        const url = normalizeDocUrl(m[1]);
-        const id = m[2];
-        if (!loadIds.has(id)) {
-          return `Source document: ${url} (full text not loaded for this question; ask about this document if needed)`;
-        }
-        const body = texts.get(id) ?? `(document could not be loaded: ${url})`;
-        return `Source document: ${url}\n${body}`;
-      })
-      .join("\n"),
+    content: replaceDocLines(row.content, loadIds, texts),
   }));
+
+  // Links pasted in chat that aren't already a knowledge entry still get their full text.
+  const knownIds = new Set(rows.flatMap((r) => docMatches(r.content).map((d) => d.id)));
+  for (const { id, url } of pasted) {
+    if (knownIds.has(id) || !loadIds.has(id)) continue;
+    const body = texts.get(id) ?? `(document could not be loaded: ${url})`;
+    expanded.push({
+      id: -1,
+      category: "pasted-document",
+      title: "Document you linked",
+      content: `Source document: ${url}\n${body}`,
+      updated_at: new Date().toISOString(),
+    });
+  }
+  return expanded;
 }
 
 async function isAdminRequest(req: Request) {
@@ -317,8 +379,15 @@ function words(text: string) {
   );
 }
 
+function isGoogleDocUrl(url: string) {
+  return /docs\.google\.com\/document\/d\//i.test(url);
+}
+
 function infoLinksIn(text: string) {
-  return [...text.matchAll(INFO_LINK_RE)].map((m) => (/^https?:\/\//i.test(m[1]) ? m[1] : `https://${m[1]}`));
+  // Google Docs are fetched via DOC export, not Gemini url_context (which usually can't read them).
+  return [...text.matchAll(INFO_LINK_RE)]
+    .map((m) => (/^https?:\/\//i.test(m[1]) ? m[1] : `https://${m[1]}`))
+    .filter((url) => !isGoogleDocUrl(url));
 }
 
 // Picks "I - <url>" links: all of them if they fit, otherwise the ones from entries that best match the question.
@@ -380,7 +449,7 @@ Rules:
 - For anything about Salerno (its government, people, laws, cities, buildings, shops, history), answer ONLY from the knowledge base below or the info pages provided. If the answer is not there, say you don't know and suggest asking Salerno staff. Never invent names, leaders, coordinates or prices.
 - For general CivMC mechanics, use the knowledge base first, then the provided info pages, then your own knowledge of CivMC / Civ servers (say when you are less sure, and point to the CivWiki).
 - Lines in the knowledge base that look like "I - <link>" are info pages. When you used one, or it is where the player should go, share it as a normal Markdown link like [civshops.pengworld.net](https://civshops.pengworld.net), never with the "I -" prefix.
-- Entries that include "Source document: <link>" are live legal or official documents (laws, constitution, etc.). When answering from them, quote or point to the specific article or section, and share the document link as a normal Markdown link so the player can read the source.
+- Entries that include "Source document: <link>" are live Google Docs (laws, constitution, or a document the user pasted). Use that text to answer. When answering from them, quote or point to the specific article or section, and share the document link as a normal Markdown link so the player can read the source. If it says the document could not be loaded, tell the user to share it as "Anyone with the link can view".
 - Do not add citation tags, topic names or brackets like [topic] to your answer.
 - Lines starting with "Image available:" contain a Markdown image. When your answer is about that thing, ALWAYS include that image by copying its Markdown exactly, on its own line at the end of the answer. Never make up image paths and never use images from anywhere else.
 - Only mention when info was last updated if it is about something that changes often (leaders, prices, wars) or it is more than 3 months old.

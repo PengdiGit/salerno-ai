@@ -8,9 +8,9 @@ Every line starting with "# " starts a new entry. Everything under it, up to the
 To make the bot read a web page, put it on its own line like this:
 I - https://example.com/some-page
 
-To include a live Google Doc (laws, constitution, etc.), put it on its own line like this.
-The doc must be shared as "Anyone with the link can view". The bot fetches the full text
-on each chat (cached for a few minutes), so edits show up without re-seeding:
+To include a live Google Doc (laws, constitution, etc.), put it on its own line like this
+(or paste the Docs link into chat). The doc must be shared as "Anyone with the link can view".
+The bot fetches the full text when relevant (cached for a few minutes):
 DOC - https://docs.google.com/document/d/YOUR_DOC_ID/edit
 
 To let the bot show a picture, upload it on the admin page (/admin) and add a line like this
