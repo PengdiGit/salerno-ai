@@ -140,14 +140,16 @@ async function saveDocToDb(id: string, text: string) {
   if (error) console.error("doc_cache write error", id, error);
 }
 
-async function downloadDocText(id: string): Promise<string> {
-  const exportUrl = `https://docs.google.com/document/d/${id}/export?format=txt`;
+async function downloadOnce(url: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOC_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(exportUrl, {
+    const res = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": "SalernoAI/1.0" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SalernoAI/1.0)",
+        Accept: "text/plain,text/*,*/*",
+      },
       redirect: "follow",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -161,6 +163,22 @@ async function downloadDocText(id: string): Promise<string> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function downloadDocText(id: string): Promise<string> {
+  const urls = [
+    `https://docs.google.com/document/d/${id}/export?format=txt`,
+    `https://docs.google.com/feeds/download/documents/export/Export?id=${id}&exportFormat=txt`,
+  ];
+  let lastErr: unknown;
+  for (const url of urls) {
+    try {
+      return await downloadOnce(url);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 function scheduleDocRefresh(id: string) {
@@ -198,14 +216,16 @@ async function fetchDocText(id: string, sourceUrl: string): Promise<string> {
     return text;
   } catch (err) {
     console.error("google doc fetch error", id, err);
-    return `(document could not be loaded: ${sourceUrl})`;
+    return `(document could not be loaded: ${sourceUrl} — open Share on the Google Doc and set General access to Anyone with the link can view, then try again)`;
   }
 }
 
 const LEGAL_HINT =
   /\b(law|laws|legal|constitution|statute|statutes|article|section|amendment|code|bill|act|ordinance|charter|rights?|court|crime|criminal|civil|trial|sentence|ban|banned|illegal|allowed|permit|permission)\b/i;
 
-// Which knowledge DOC entries to expand for this question (avoids stuffing every law into every prompt).
+// Which knowledge DOC entries to expand for this question.
+// Curated DOC - links are meant to be readable: if there are only a few, always load them
+// (cheap once cached). If there are many, prefer ones that match the question.
 function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
   const byId = new Map<string, { score: number; url: string }>();
   const q = words(question);
@@ -219,7 +239,7 @@ function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
     const catWords = words(row.category);
     GOOGLE_DOC_URL_RE.lastIndex = 0;
     const bodyWords = words(row.content.replace(GOOGLE_DOC_URL_RE, " "));
-    let score = 0;
+    let score = 1; // knowledge DOC - entries always count at least a little
     for (const w of q) {
       if (titleWords.has(w)) score += 5;
       else if (catWords.has(w)) score += 3;
@@ -229,16 +249,18 @@ function pickDocIds(rows: KnowledgeRow[], question: string): Set<string> {
       score += 2;
     }
     for (const { id, rawUrl } of docs) {
-      // User pasted this doc's link in chat → always load it.
+      // User pasted this doc's link in chat → always prefer it.
       const finalScore = pasted.has(id) ? Math.max(score, 100) : score;
       const prev = byId.get(id);
       if (!prev || finalScore > prev.score) byId.set(id, { score: finalScore, url: normalizeDocUrl(rawUrl) });
     }
   }
 
+  if (!byId.size) return new Set();
+  // Few curated docs: load all of them every time (DB cache keeps this fast).
+  if (byId.size <= MAX_DOCS_PER_REQUEST) return new Set(byId.keys());
   return new Set(
     [...byId.entries()]
-      .filter(([, v]) => v.score > 0)
       .sort((a, b) => b[1].score - a[1].score)
       .slice(0, MAX_DOCS_PER_REQUEST)
       .map(([id]) => id),
